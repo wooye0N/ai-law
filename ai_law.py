@@ -43,6 +43,8 @@ DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_MODEL = "glm-4-flash"
 KB_DIR = Path(__file__).parent / "kb"
 NPC_CACHE_DIR = Path(__file__).parent / "kb_npc_cache"
+BUNDLE_GZ = Path(__file__).parent / "kb_bundle.jsonl.gz"
+BUNDLE_JSONL = Path(__file__).parent / "kb_bundle.jsonl"
 
 # 首次启动自动拉取的核心法律（覆盖民事 / 劳动 / 刑事 / 行政 / 消费维权）
 CORE_LAWS = [
@@ -227,6 +229,31 @@ def _load_docx_articles(path: Path, source_name: str):
     return [{"text": art, "source": source_name} for art in _split_articles(raw) if len(art) >= 8]
 
 
+def _load_bundle():
+    """从打包好的 kb_bundle 读取法条（云端部署用，避免上传上千个小文件）。"""
+    import gzip
+    import json
+
+    for p in (BUNDLE_GZ, BUNDLE_JSONL):
+        if not p.exists():
+            continue
+        try:
+            fh = gzip.open(p, "rt", encoding="utf-8") if p.suffix == ".gz" else p.open(encoding="utf-8")
+            out = []
+            with fh as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    out.append({"text": obj["t"], "source": obj["s"]})
+            print(f"[知识库] 已加载打包法条 {len(out)} 条（{p.name}）")
+            return out
+        except Exception as e:
+            print(f"[知识库] 读取 {p.name} 失败：{e}")
+    return []
+
+
 @st.cache_resource(show_spinner="正在加载法条知识库（首次会自动从国家法律法规数据库拉取核心法律）…")
 def load_kb():
     import jieba
@@ -234,6 +261,9 @@ def load_kb():
 
     jieba.setLogLevel(60)
     docs = []
+
+    # 0) 打包法条（优先，含广西地方性法规等扩展库）
+    docs.extend(_load_bundle())
 
     # 1) 本地 kb/ 目录（txt + docx）
     if KB_DIR.exists():
@@ -256,6 +286,16 @@ def load_kb():
 
     if not docs:
         return None
+
+    # 去重（打包库与 kb/ 目录可能有重叠）
+    seen, uniq = set(), []
+    for d in docs:
+        key = (d["source"], d["text"][:60])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(d)
+    docs = uniq
 
     corpus = [list(jieba.cut(d["text"])) for d in docs]
     return {"docs": docs, "bm25": BM25Okapi(corpus)}
